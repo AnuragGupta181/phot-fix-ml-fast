@@ -1,34 +1,25 @@
-# ============================
-# FotoFix FastAPI Server (FINAL)
-# ============================
+# uvicorn src.server:app --reload
 
-import os
-import uuid
-from typing import List
-
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from starlette.requests import Request
-
-from pydantic import BaseModel
-
 from ultralytics import YOLO
+import uvicorn as uv
+import pytesseract
+from pydantic import BaseModel
 from rembg import remove
 from PIL import Image
-import pytesseract
+import os
+import shutil
+import base64
+import uuid
 
-from src.utils import (
-    allowed_file,
-    make_output_folder,
-    save_jpg,
-    draw_boxes_and_save,
+pytesseract.pytesseract.tesseract_cmd = (
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 )
 
-# --------------------------------------------------
-# CONFIGURATION
-# --------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
@@ -38,21 +29,18 @@ MODEL_PATH = os.path.join(BASE_DIR, "best11.pt")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-pytesseract.pytesseract.tesseract_cmd = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
-
-# Force CPU usage (EC2 safe)
 model = YOLO(MODEL_PATH)
 model.to("cpu")
 
-# --------------------------------------------------
-# FASTAPI APP
-# --------------------------------------------------
+from src.utils import (
+    draw_boxes,
+    save_jpg,
+)
+
 app = FastAPI(
-    title="FotoFix API",
+    title="FotoFix ML Server",
     description="YOLO + OCR + Background Removal API",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -63,44 +51,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --------------------------------------------------
-# Pydantic Models (Responses)
-# --------------------------------------------------
+
 class HealthResponse(BaseModel):
     status: str
     message: str
     code: int
 
-
-class DetectionBBox(BaseModel):
-    class_name: str
-    confidence: float
-    bbox: List[float]
-
-
-class DetectResponse(BaseModel):
-    status: str
-    output_url: str
-    detections: List[DetectionBBox]
-    object_types: List[str]
-
-
-class SimpleOutputResponse(BaseModel):
-    status: str
-    output_url: str
-
-
-class OCRResponse(BaseModel):
-    status: str
-    extracted_text: str
-
-
-class FindAllResponse(BaseModel):
-    images: List[str]
-
-# --------------------------------------------------
-# GLOBAL EXCEPTION HANDLERS
-# --------------------------------------------------
+class ChatRequest(BaseModel):
+    user_id: str
+    message: str
+    
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request, exc: RequestValidationError
@@ -126,9 +86,6 @@ async def global_exception_handler(request: Request, exc: Exception):
         },
     )
 
-# --------------------------------------------------
-# ROUTES
-# --------------------------------------------------
 @app.get("/", tags=["Info"])
 def info():
     return {
@@ -137,8 +94,6 @@ def info():
             "POST /detect": "YOLO object detection",
             "POST /remove-bg": "Remove image background",
             "POST /extract-text": "OCR text extraction",
-            "POST /find-all": "List user output images",
-            "GET /outputs/{user_id}/{file_name}": "Serve output image",
         },
     }
 
@@ -151,152 +106,73 @@ def health():
         code=200,
     )
 
-# --------------------------------------------------
-# YOLO DETECTION
-# --------------------------------------------------
-@app.post("/detect", response_model=DetectResponse, tags=["Detection"])
-async def detect(
-    image: UploadFile = File(...),
-    user_id: str = Form(...),
-):
-    if not image.filename or not allowed_file(image.filename):
-        raise HTTPException(400, "Invalid file type")
+
+@app.post("/detect")
+async def detect(file: UploadFile):
+    if not file:
+        return JSONResponse(status_code=400, content={"error": "File is required"})
+    
+    file_path = f"src/uploads/{file.filename}"
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+
+    output_image_data = await draw_boxes(image_path=file_path)
+
+    output_image_path = output_image_data[0]
+    boxes, classes, confidences = output_image_data[1], output_image_data[2], output_image_data[3]
+
+    with open(output_image_path, "rb") as f:
+        image_bytes = f.read()
+
+    os.remove(file_path)
+    shutil.rmtree(os.path.dirname(output_image_path), ignore_errors=True)
+
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    return {"boxes": boxes[0], "classes": classes[0], "confidences": confidences[0], "encoded_image": encoded_image}
+
+@app.post("/remove-bg")
+async def remove_bg(file: UploadFile):
+    if not file:
+        return JSONResponse(status_code=400, content={"error": "File is required"})
+    
+    file_path = f"src/uploads/{file.filename}"
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
 
     uid = uuid.uuid4().hex
-    upload_path = os.path.join(UPLOAD_DIR, f"{uid}_{image.filename}")
+    out_name = f"{uid}_processed_bg.jpg"
+    output_image_path = os.path.join("src/outputs", out_name)
 
-    with open(upload_path, "wb") as f:
-        f.write(await image.read())
+    img = Image.open(file_path)
+    no_bg = remove(img)
+    save_jpg(no_bg, output_image_path)
 
-    try:
-        results = model.predict(source=upload_path, save=False)[0]
+    with open(output_image_path, "rb") as f:
+        image_bytes = f.read()
 
-        boxes: List[List[float]] = []
-        classes: List[str] = []
-        confidences: List[float] = []
+    os.remove(file_path)
+    shutil.rmtree(os.path.dirname(output_image_path), ignore_errors=True)
 
-        for b in results.boxes:
-            boxes.append(b.xyxy[0].tolist())
-            cls = int(b.cls[0])
-            classes.append(model.names[cls])
-            confidences.append(float(b.conf[0]))
+    encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    return {"encoded_image": encoded_image}
 
-        out_folder = make_output_folder(OUTPUT_DIR, user_id)
-        out_name = f"{uid}_processed_detect.jpg"
-        out_path = os.path.join(out_folder, out_name)
+@app.post("/extract-text")
+async def extract_text(file: UploadFile):
+    if not file:
+        return JSONResponse(status_code=400, content={"error": "File is required"})
+    
+    file_path = f"src/uploads/{file.filename}"
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
 
-        draw_boxes_and_save(upload_path, boxes, classes, out_path)
+    img = Image.open(file_path)
+    text = pytesseract.image_to_string(img)
 
-        detections = [
-            DetectionBBox(
-                class_name=classes[i],
-                confidence=confidences[i],
-                bbox=boxes[i],
-            )
-            for i in range(len(boxes))
-        ]
+    os.remove(file_path)
 
-        return DetectResponse(
-            status="success",
-            output_url=f"/outputs/{user_id}/{out_name}",
-            detections=detections,
-            object_types=list(set(classes)),
-        )
+    return {"extracted_text": text}
 
-    finally:
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
 
-# --------------------------------------------------
-# BACKGROUND REMOVAL
-# --------------------------------------------------
-@app.post("/remove-bg", response_model=SimpleOutputResponse, tags=["Background"])
-async def remove_bg(
-    image: UploadFile = File(...),
-    user_id: str = Form(...),
-):
-    if not image.filename or not allowed_file(image.filename):
-        raise HTTPException(400, "Invalid file type")
 
-    uid = uuid.uuid4().hex
-    upload_path = os.path.join(UPLOAD_DIR, f"{uid}_{image.filename}")
-
-    with open(upload_path, "wb") as f:
-        f.write(await image.read())
-
-    try:
-        img = Image.open(upload_path)
-        no_bg = remove(img)
-
-        out_folder = make_output_folder(OUTPUT_DIR, user_id)
-        out_name = f"{uid}_processed_bg.jpg"
-        out_path = os.path.join(out_folder, out_name)
-
-        save_jpg(no_bg, out_path)
-
-        return SimpleOutputResponse(
-            status="success",
-            output_url=f"/outputs/{user_id}/{out_name}",
-        )
-
-    finally:
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
-
-# --------------------------------------------------
-# OCR EXTRACTION
-# --------------------------------------------------
-@app.post("/extract-text", response_model=OCRResponse, tags=["OCR"])
-async def extract_text(
-    image: UploadFile = File(...),
-    user_id: str = Form(...),
-):
-    if not image.filename or not allowed_file(image.filename):
-        raise HTTPException(400, "Invalid file type")
-
-    uid = uuid.uuid4().hex
-    upload_path = os.path.join(UPLOAD_DIR, f"{uid}_{image.filename}")
-
-    with open(upload_path, "wb") as f:
-        f.write(await image.read())
-
-    try:
-        text = pytesseract.image_to_string(Image.open(upload_path))
-        return OCRResponse(
-            status="success",
-            extracted_text=text.strip(),
-        )
-
-    finally:
-        if os.path.exists(upload_path):
-            os.remove(upload_path)
-
-# --------------------------------------------------
-# FIND ALL USER OUTPUTS
-# --------------------------------------------------
-@app.post("/find-all", response_model=FindAllResponse, tags=["Outputs"])
-def find_all(user_id: str = Form(...)):
-    folder = os.path.join(OUTPUT_DIR, user_id)
-    if not os.path.exists(folder):
-        return FindAllResponse(images=[])
-
-    files = sorted(os.listdir(folder))
-    return FindAllResponse(
-        images=[f"/outputs/{user_id}/{f}" for f in files]
-    )
-
-# --------------------------------------------------
-# SERVE OUTPUT FILES
-# --------------------------------------------------
-@app.get("/outputs/{user_id}/{file_name}", tags=["Outputs"])
-def serve_output(user_id: str, file_name: str):
-    path = os.path.join(OUTPUT_DIR, user_id, file_name)
-    if not os.path.isfile(path):
-        raise HTTPException(404, "File not found")
-
-    return FileResponse(path)
-
-# --------------------------------------------------
-# RUN COMMAND (DO NOT USE python server.py)
-# --------------------------------------------------
-# uvicorn src.server:app --reload
+if __name__ == "__main__":
+    uv.run("server:app", host="127.0.0.1", port=8000, reload=True)

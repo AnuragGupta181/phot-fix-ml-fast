@@ -5,15 +5,12 @@ from typing_extensions import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode, tools_condition
-# Switched to MemorySaver to fix the "Invalid Checkpointer" error
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import SystemMessage, HumanMessage
 from dotenv import load_dotenv
 
-# Import tools from your fire_tools.py file
-# Make sure fire_tools.py is in the same folder!
-from fire_tools import tools_list
+from tools import tools_list
 
 # Load environment variables (.env)
 load_dotenv()
@@ -93,45 +90,7 @@ async def get_graph_app():
     app = graph.compile(checkpointer=checkpointer)
     return app, conn
 
-# --- ⬇️ STANDALONE TESTING BLOCK ⬇️ ---
+
 if __name__ == "__main__":
     async def main():
-        print("🔧 DEBUG MODE: Testing FireWatch Bot...")
-        
-        # 1. Check API Key
-        api_key = os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            print("❌ FATAL: GOOGLE_API_KEY is missing from .env file.")
-            return
-        print("✅ API Key found.")
-
-        try:
-            # 2. Initialize App
-            app, conn = await get_graph_app()
-            
-            # 3. Simulate a Chat
-            config = {"configurable": {"thread_id": "debug_user_123"}}
-            
-            # Manually open the 'connection' (even though it's RAM now)
-            async with conn:
-                print("💬 Sending test message to AI...")
-                
-                inputs = {
-                    "messages": [
-                        SYSTEM_PROMPT, 
-                        HumanMessage(content="Hello, is the system online?")
-                    ]
-                }
-                
-                # Run the graph
-                final_state = await app.ainvoke(inputs, config=config)
-                
-                # Print result
-                print(f"\n🤖 AI Response:\n{final_state['messages'][-1].content}")
-                print("\n✅ SUCCESS: The bot is working correctly.")
-
-        except Exception as e:
-            print(f"\n❌ ERROR: {e}")
-
-    # Run the test
-    asyncio.run(main())
+        pass
