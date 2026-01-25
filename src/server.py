@@ -16,9 +16,13 @@ import shutil
 import base64
 import uuid
 
+# pytesseract.pytesseract.tesseract_cmd = (
+#     r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+# ) # for WIndows
+
 pytesseract.pytesseract.tesseract_cmd = (
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-)
+    '/usr/bin/tesseract'
+)  # for Ubuntu
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
