@@ -36,7 +36,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 model = YOLO(MODEL_PATH)
 model.to("cpu")
 
-from src.utils import (
+from utils import (
     draw_boxes,
     save_jpg,
 )
